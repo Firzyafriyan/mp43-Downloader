@@ -117,7 +117,6 @@ def run_download_worker(task_id, url, fmt, quality):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # Find the output file in tmpdir
         files = [f for f in os.listdir(tmpdir) if not f.endswith('.part')]
         if not files:
             raise Exception("Tidak ada berkas media yang selesai diproses.")
@@ -148,6 +147,15 @@ class DownloaderHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=DIRECTORY, **kwargs)
 
+    def send_json(self, data, status=200):
+        payload = json.dumps(data).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(payload)))
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.wfile.write(payload)
+
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
@@ -164,20 +172,13 @@ class DownloaderHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
 
         if path == '/api/health':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok"}).encode('utf-8'))
+            self.send_json({"status": "ok"})
             return
 
         elif path == '/api/progress':
             task_id = query.get('taskId', [None])[0]
             task = TASKS.get(task_id, {"status": "not_found", "message": "Task tidak ditemukan"})
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(task).encode('utf-8'))
+            self.send_json(task)
             return
 
         elif path == '/api/file':
@@ -201,8 +202,11 @@ class DownloaderHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
 
             with open(file_path, 'rb') as f:
-                while chunk := f.read(64 * 1024):
-                    self.wfile.write(chunk)
+                try:
+                    while chunk := f.read(64 * 1024):
+                        self.wfile.write(chunk)
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                    pass
             return
 
         super().do_GET()
@@ -228,23 +232,20 @@ class DownloaderHandler(http.server.SimpleHTTPRequestHandler):
                     'message': 'Memulai proses pengunduhan...'
                 }
 
-                # Start worker in background thread
                 thread = threading.Thread(target=run_download_worker, args=(task_id, url, fmt, quality), daemon=True)
                 thread.start()
 
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"taskId": task_id}).encode('utf-8'))
+                self.send_json({"taskId": task_id})
 
             except Exception as e:
-                self.send_response(400)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+                self.send_json({"error": str(e)}, status=400)
         else:
             self.send_response(404)
             self.end_headers()
+
+class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 
 if __name__ == '__main__':
     print(f"==================================================")
@@ -253,8 +254,7 @@ if __name__ == '__main__':
     print(f"  Live API:    http://localhost:{PORT}/api/start-download")
     print(f"==================================================")
     
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", PORT), DownloaderHandler) as httpd:
+    with ThreadingTCPServer(("", PORT), DownloaderHandler) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
