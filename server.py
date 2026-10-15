@@ -16,6 +16,15 @@ import uuid
 import threading
 import time
 
+# Fix Windows terminal encoding crash (cp1252 -> utf-8)
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+if sys.stdout and sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 PORT = 5000
 DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 
@@ -35,6 +44,12 @@ TEMP_FILES = {}
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
+def safe_str(text):
+    """Ensure string is safe to print on any Windows terminal."""
+    if isinstance(text, bytes):
+        return text.decode('utf-8', errors='replace')
+    return str(text).encode('ascii', errors='replace').decode('ascii')
+
 def run_download_worker(task_id, url, fmt, quality):
     import yt_dlp
 
@@ -44,7 +59,7 @@ def run_download_worker(task_id, url, fmt, quality):
     task['message'] = 'Menghubungi server YouTube via yt-dlp...'
 
     tmpdir = tempfile.mkdtemp(prefix='mp43_')
-    out_template = os.path.join(tmpdir, "%(title)s.%(ext)s")
+    out_template = os.path.join(tmpdir, "%(title).100B.%(ext)s")
 
     def progress_hook(d):
         if d['status'] == 'downloading':
@@ -80,7 +95,9 @@ def run_download_worker(task_id, url, fmt, quality):
         'no_warnings': True,
         'quiet': True,
         'no_playlist': True,
-        'nocheckcertificate': True
+        'nocheckcertificate': True,
+        'restrictfilenames': True, # ASCII-safe filenames to prevent Windows encoding crash
+        'windowsfilenames': True,  # Extra safety for Windows reserved chars
     }
 
     if FFMPEG_EXE and os.path.exists(FFMPEG_EXE):
@@ -135,13 +152,14 @@ def run_download_worker(task_id, url, fmt, quality):
         task['percent'] = 100
         task['message'] = 'Konversi & Unduhan Selesai 100%!'
         task['filename'] = target_file
-        print(f"[Success] Task {task_id} completed: {target_file}")
+        print(f"[Success] Task {task_id} completed: {safe_str(target_file)}")
 
     except Exception as e:
+        err_msg = safe_str(str(e))
         task['status'] = 'error'
-        task['error'] = str(e)
-        task['message'] = f"Gagal mengunduh: {e}"
-        print(f"[Error] Task {task_id} failed: {e}")
+        task['error'] = err_msg
+        task['message'] = f"Gagal mengunduh: {err_msg}"
+        print(f"[Error] Task {task_id} failed: {err_msg}")
 
 class DownloaderHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
